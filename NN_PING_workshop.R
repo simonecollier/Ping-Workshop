@@ -1,4 +1,4 @@
-install.packages("neuralnet")
+#install.packages("neuralnet")
 library(neuralnet)
 library(dplyr)
 
@@ -10,10 +10,10 @@ ping_data=ping_data[,3:ncol(ping_data)]
 # PROCESS AND NORMALIZE DATA
 
 # keep two fish of LT and LW
-#ping_data=ping_data[ping_data$fishNum=="LT014"|ping_data$fishNum=="LT016"|ping_data$fishNum=="LWF009"|ping_data$fishNum=="LWF005",]
+ping_data2=ping_data[ping_data$fishNum=="LT014"|ping_data$fishNum=="LT016"|ping_data$fishNum=="LWF009"|ping_data$fishNum=="LWF005",]
 
 #ping_data2<-ping_data%>%filter(fishNum=="LT014"|fishNum=="LT016"|fishNum=="LWF005"|fishNum=="LWF009")
-ping_data2=ping_data[ping_data$fishNum!="SMB013"&ping_data$fishNum!="LT013"&ping_data$fishNum!="LWF007"&ping_data$fishNum!="BUR001"&ping_data$fishNum!="BUR002",]
+#ping_data2=ping_data[ping_data$fishNum!="SMB013"&ping_data$fishNum!="LT013"&ping_data$fishNum!="LWF007"&ping_data$fishNum!="BUR001"&ping_data$fishNum!="BUR002",]
 
 F45index <- which(names(ping_data2) == "F45")
 
@@ -39,16 +39,19 @@ X3=exp(ping_data2[,listf3[f3inc]]/10)
 X1=(X1-apply(X1,1,min))/(apply(X1,1,max)-apply(X1,1,min)) #second step in normalization
 X2=(X2-apply(X2,1,min))/(apply(X2,1,max)-apply(X2,1,min))
 X3=(X3-apply(X3,1,min))/(apply(X3,1,max)-apply(X3,1,min))
-#X4=ping_data2[,c("Angle_minor_axis", "Angle_major_axis", "aspectAngle")] #auxiliary variables (ranges and depths)
-X=cbind(X1,X2,X3)#,X4) #predictor matrix
+X4=ping_data2[,c("Angle_minor_axis", "Angle_major_axis", "aspectAngle")] #auxiliary variables (ranges and depths)
+X=cbind(X1,X2,X3,X4) #predictor matrix
 Y=as.factor(ping_data2$species) #response variable: species ID
 fish <- ping_data2$fishNum[!is.na(rowSums(X))]
 Y=Y[!is.na(rowSums(X))]
 X=X[!is.na(rowSums(X)),]
+track <- ping_data2$Region_name[!is.na(rowSums(X))]
+region <- as.numeric(as.factor(ping_data2$Region_name[!is.na(rowSums(X))]))
 
+region.index<-as.numeric(interaction(ping_data2$fishNum,ping_data2$Region_name)) #308 levels
 
 resampled_fishIndex <- c()
-nping <- 100
+nping <- 500
 for (ID in unique(fish)) {
   if (sum(fish == ID) < nping) {
     resampled_fishIndex <- c(resampled_fishIndex, which(fish == ID)) 
@@ -60,17 +63,30 @@ print(length(resampled_fishIndex))
 
 Y=Y[resampled_fishIndex]
 X=X[resampled_fishIndex,]
+track<-track[resampled_fishIndex]
+region.index<-region.index[resampled_fishIndex]
 
 d<-cbind.data.frame(X,Y)
 
-col_list <- paste(c(colnames(d[,1:366])),collapse="+")
+col_list <- paste(c(colnames(d[,1:369])),collapse="+")
 col_list <- paste(c("Y~",col_list),collapse="")
 f <- formula(col_list)
 
 ## For breaking into test and training
-inp <- sample(2, nrow(d), replace = TRUE, prob = c(0.7, 0.3))
-training_data <- d[inp==1, ]
-test_data <- d[inp==2, ]
+d$region<-region.index
+splitdata.list<-ungroup(d) %>%
+  nest_by(region) %>%
+  ungroup() %>% 
+  mutate(tt = floor(.7*n()),
+         tt = sample(rep(c('train', 'test'), c(tt[1], n()-tt[1])))) %>%
+  unnest(data) %>%
+  group_split(tt, .keep = FALSE)
+
+training_data<-splitdata.list[[2]]
+test_data<-splitdata.list[[1]]
+
+
+### don't have the same fish tracks in the training and test
 
 n <- neuralnet(f,
                data = training_data,
@@ -86,18 +102,17 @@ n <- neuralnet(f,
 
 # Prediction - in sample
 #Test the resulting output
-training_data.2 <- training_data[,-367]
+training_data.2 <- training_data[,c(-1,-371)]
 nn.results <- predict(n, training_data.2)
 head(nn.results)
 # nn.results gives the probabilities of each ping to be laketrout[,1] or lakewhitefish[,2]
 
-results <- data.frame(actual = training_data$Y, prediction = nn.results$net.result)
-
 
 # confusion Matrix  -Training data
 # if probability is over 0.5 then it is classified as a lake trout
-pred1 <- ifelse(nn.results[,1] > 0.5, "LT",ifelse(nn.results[,2] > 0.5, "LW", "SMB")) # species 1 = laketrout
-tab1 <- table(pred1, training_data[,367])
+pred1 <- ifelse(nn.results[,1] > 0.5, "LT","LW") # species 1 = laketrout
+#pred1 <- ifelse(nn.results[,1] > 0.5, "LT",ifelse(nn.results[,2] > 0.5, "LW", "SMB")) # species 1 = laketrout
+tab1 <- table(pred1, training_data[,371]$Y)
 tab1
 
 # misclassification error
@@ -105,14 +120,19 @@ tab1
 
 # Prediction - out sample
 #Test the resulting output
-test_data.2 <- test_data[,-367]
+test_data.2 <- test_data[,c(-1,-371)]
 nn.results <-predict(n, test_data.2)
 
 # confusion Matrix $-Test data
 # if probability is over 0.5 then it is classified as a lake trout
-pred1 <- ifelse(nn.results[,1] > 0.5, "LT",ifelse(nn.results[,2] > 0.5, "LW", "SMB"))
-tab1 <- table(pred1, test_data[,367])
+pred1 <- ifelse(nn.results[,1] > 0.5, "LT","LW")
+#pred1 <- ifelse(nn.results[,1] > 0.5, "LT",ifelse(nn.results[,2] > 0.5, "LW", "SMB"))
+tab1 <- table(pred1, test_data[,371]$Y,test_data[,1]$region)
 tab1
+
+
+cbind(pred1, test_data[,367],track)
+
 
 # misclassification error
 1 - sum(diag(tab1)) / sum(tab1)
